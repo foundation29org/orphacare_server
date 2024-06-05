@@ -1,3 +1,4 @@
+const { get } = require('request');
 const config = require('../config')
 const insights = require('../services/insights');
 const { OpenAI } = require("openai");
@@ -108,6 +109,75 @@ async function getInfo(req, res) {
   }
 }
 
+async function getAnswer(req, res) {
+  // Now from a new question, based on the condition and the orphanDrugs, generate an answer based on the documents
+  // The return of this function should be only the answer
+  try {
+    var condition = req.params.name;
+    var question = req.params.question;
+    var orphanDrugs = req.params.orphanDrugs;
+    let prompt = `
+    Based on their condition ${condition} and their medicines ${orphanDrugs}, generate an answer to the following question from the patient: ${question}
+    
+    Remember that the answer should be very easy to understand and concise. The objective is to help the user understand the condition and the medicine better.
+    Based on the documents, you have to generate an answer to the question.
+
+    <question>
+    ${question}
+    </question>
+
+    Output should be just the answer, nothing else.
+    <output>
+    Answer to the question.
+    </output>
+    `
+    
+    let messages = [
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ];
+
+    const thread = await openai.beta.threads.create({
+      messages: messages,
+    });
+
+    let threadId = thread.id;
+    console.log('Created thread with Id: ' + threadId);
+
+    const run = await openai.beta.threads.runs.createAndPoll(thread.id, {
+      assistant_id: config.EPAR_ASSISTANT_ID,
+      additional_instructions: '',
+    });
+
+    console.log('Run finished with status: ' + run.status);
+
+    if (run.status == 'completed') {
+      const messages = await openai.beta.threads.messages.list(thread.id);
+      let response = messages.getPaginatedItems()[0].content[0].text.value;
+      console.log(response)
+      let parsedResponse = extractAndParse(response);
+      console.log(parsedResponse)
+      res.status(200).send({ data: parsedResponse })
+      // for (const message of messages.getPaginatedItems()) {
+      //   console.log(message);
+      // }
+    } else {
+      throw new Error("The run did not complete successfully.");
+    }
+  } catch (error) {
+    console.error('Error occurred:', error);
+    var respu = {
+      "msg": 'error',
+      "status": 500
+    }
+    res.status(500).send(respu)
+  }
+}
+
+
 module.exports = {
   getInfo,
+  getAnswer
 };
