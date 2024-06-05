@@ -57,6 +57,7 @@ api.get('/searchdisease/:id', diseaseCtrl.searchDisease)
 api.get('/validateddiseases', diseaseCtrl.validatedDiseases)
 
 api.get('/getinfo/:name', langchain.getInfo)
+api.post('/getanswer', langchain.getAnswer)
 
 /*api.get('/testToken', auth, (req, res) => {
 	res.status(200).send(true)
