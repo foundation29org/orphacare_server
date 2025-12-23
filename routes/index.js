@@ -13,6 +13,7 @@ const auth = require('../middlewares/auth')
 const roles = require('../middlewares/roles')
 const api = express.Router()
 const config= require('../config')
+const langchain = require('../services/langchain')
 const myApiKey = config.Server_Key;
 
 const checkApiKey = (req, res, next) => {
@@ -54,6 +55,9 @@ api.post('/deletedisease/:userId', auth(roles.OnlyUser), diseaseCtrl.deleteDisea
 
 api.get('/searchdisease/:id', diseaseCtrl.searchDisease)
 api.get('/validateddiseases', diseaseCtrl.validatedDiseases)
+
+api.get('/getinfo/:name', langchain.getInfo)
+api.post('/getanswer', langchain.getAnswer)
 
 /*api.get('/testToken', auth, (req, res) => {
 	res.status(200).send(true)

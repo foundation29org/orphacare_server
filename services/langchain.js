@@ -1,107 +1,181 @@
-const { ChatOpenAI } = require("langchain/chat_models/openai");
+const { get } = require('request');
 const config = require('../config')
 const insights = require('../services/insights');
-const { Client } = require("langsmith")
-const { LangChainTracer } = require("langchain/callbacks");
-const { LLMChain } = require("langchain/chains");
-const { ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate, MessagesPlaceholder } = require("langchain/prompts");
-
-const AZURE_OPENAI_API_KEY = config.OPENAI_API_KEY;
-const OPENAI_API_KEY = config.OPENAI_API_KEY_J;
-const OPENAI_API_VERSION = config.OPENAI_API_VERSION;
-const OPENAI_API_BASE = config.OPENAI_API_BASE;
-const client = new Client({
-  apiUrl: "https://api.smith.langchain.com",
-  apiKey: config.LANGSMITH_API_KEY,
+const { OpenAI } = require("openai");
+const openai = new OpenAI({
+  apiKey: config.OPENAI_API_KEY_EPAR // This is also the default, can be omitted
 });
 
-function createModels(projectName) {
-  const tracer = new LangChainTracer({
-    projectName: projectName,
-    client
-  });
-  
-  const model = new ChatOpenAI({
-    modelName: "gpt-4-0613",
-    azureOpenAIApiKey: AZURE_OPENAI_API_KEY,
-    azureOpenAIApiVersion: OPENAI_API_VERSION,
-    azureOpenAIApiInstanceName: OPENAI_API_BASE,
-    azureOpenAIApiDeploymentName: "nav29",
-    temperature: 0,
-    timeout: 500000,
-    callbacks: [tracer],
-  });
-  
-  const model32k = new ChatOpenAI({
-    modelName: "gpt-4-32k-0613",
-    azureOpenAIApiKey: AZURE_OPENAI_API_KEY,
-    azureOpenAIApiVersion: OPENAI_API_VERSION,
-    azureOpenAIApiInstanceName: OPENAI_API_BASE,
-    azureOpenAIApiDeploymentName: "test32k",
-    temperature: 0,
-    timeout: 500000,
-    callbacks: [tracer],
-  });
+function extractAndParse(summaryText) {
+  // Step 1: Extract Text using Regular Expressions
+  let matches = summaryText.match(/<output>(.*?)<\/output>/s);
+  if (!matches) {
+    console.warn("No matches found in <output> tags.");
+    return "[]";
+  }
 
-  const model128k = new ChatOpenAI({
-    modelName: "gpt-4-1106-preview",
-    openAIApiKey: OPENAI_API_KEY,
-    temperature: 0,
-    timeout: 500000,
-    callbacks: [tracer],
-  });
-  
-  return { model, model32k, model128k };
+  // Assuming the content in <output> is JSON
+  try {
+    // Step 2: Convert Extracted Text to JSON
+    const extractedJson = JSON.parse(matches[1]);  // Considering only the first match
+    return JSON.stringify(extractedJson);
+  } catch (error) {
+    console.log(error)
+    console.warn("Invalid JSON format in <output> tags.");
+    return "Invalid JSON format";
+  }
 }
 
-// This function will be a basic conversation with documents (context)
-async function generate_items_for_disease(disease){
-  return new Promise(async function (resolve, reject) {
-    try {
-      // Create the models
-      const projectName = `${config.LANGSMITH_PROJECT}`;
-      let { model, model32k, model128k } = createModels(projectName);
-  
-
-      const systemMessagePrompt = SystemMessagePromptTemplate.fromTemplate(
-        `You are a medical expert, based on this context from the patient.`
-      );
-  
-      const humanMessagePrompt = HumanMessagePromptTemplate.fromTemplate(
-        `Make a list of ten items that are important to a patient with {disease_name}. It should be ten simple sentences that explain a problem that is important to the patient or their caregivers and that is an unmet medical need. They should be items that a drug or treatment could change. When the answer is a set of co-morbidities give the separate items.
-        Return this python List with the top 10 most probable like "Patient-Reported Outcome Measures (PROMs)".
-        Return only this list of PROMs, without any other text.
-        ----------------------------------------
-        Example: [{{ "name": "PROM1" }}, {{ "name": "PROM2" }}, {{ "name": "PROM3" }}, {{ "name": "PROM4" }}, {{ "name": "PROM5" }}, {{ "name": "PROM6" }}, {{ "name": "PROM7" }}, {{ "name": "PROM8" }}, {{ "name": "PROM9" }}, {{ "name": "PROM10" }}]
-        ----------------------------------------
-        PROM List:`
-      );
-  
-      const chatPrompt = ChatPromptTemplate.fromMessages([systemMessagePrompt, humanMessagePrompt]);
-     
-      const chain = new LLMChain({
-        prompt: chatPrompt,
-        llm: model,
-      });
-
-      response = await chain.invoke({
-        disease_name: disease,
-      });
-
-      // console.log(response);
-      resolve(response);
-    } catch (error) {
-      console.log("Error happened: ", error)
-      insights.error(error);
-      var respu = {
-        "msg": error,
-        "status": 500
+async function getInfo(req, res) {
+  try {
+    var condition = req.params.name;
+    // You have to search what medicine leaflets are available in the documents
+    // The return of this function should have two keys:
+    // orphanDrugs and questionAnswers
+    let prompt = `You have to search what medicine leaflets are available in the documents. The condition to search is: ${condition}. 
+    You have to return the name of the medicines first and then generate 3 question and answer pairs relevant for those medicines and the condition.
+    
+    Output should ALWAYS ALWAYS be EXACTLY as the following output example in XML output tag with JSON inside:
+    <output>
+    {
+    "orphanDrugs": [
+      {
+        "name": "Medicine 1 (and the active ingredient)"
+      },
+      ...
+      {
+        "name": "Medicine N (and the active ingredient)"
+      },
+    ]
+    "questionsAnswers": [
+      {
+        "question": "Question 1",
+        "answer": "Answer 1"
+      },
+      {
+        "question": "Question 2", 
+        "answer": "Answer 2"
+      },
+      {
+        "question": "Question 3",
+        "answer": "Answer 3"
       }
-      resolve(respu);
+    ]
     }
-  });
+    </output>
+    `
+    
+    let messages = [
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ];
+
+    const thread = await openai.beta.threads.create({
+      messages: messages,
+    });
+
+    let threadId = thread.id;
+    console.log('Created thread with Id: ' + threadId);
+
+    const run = await openai.beta.threads.runs.createAndPoll(thread.id, {
+      assistant_id: config.EPAR_ASSISTANT_ID,
+      additional_instructions: '',
+    });
+
+    console.log('Run finished with status: ' + run.status);
+
+    if (run.status == 'completed') {
+      const messages = await openai.beta.threads.messages.list(thread.id);
+      let response = messages.getPaginatedItems()[0].content[0].text.value;
+      console.log(response)
+      let parsedResponse = extractAndParse(response);
+      console.log(parsedResponse)
+      res.status(200).send({ data: parsedResponse })
+      // for (const message of messages.getPaginatedItems()) {
+      //   console.log(message);
+      // }
+    } else {
+      throw new Error("The run did not complete successfully.");
+    }
+  } catch (error) {
+    console.error('Error occurred:', error);
+    var respu = {
+      "msg": 'error',
+      "status": 500
+    }
+    res.status(500).send(respu)
+  }
 }
+
+async function getAnswer(req, res) {
+  // Now from a new question, based on the condition and the orphanDrugs, generate an answer based on the documents
+  // The return of this function should be only the answer
+  try {
+    var condition = req.body.name;
+    var question = req.body.question;
+    var orphanDrugs = req.body.orphanDrugs;
+    let prompt = `
+    Based on their condition ${condition} and their medicines ${orphanDrugs}, generate an answer to the following question from the patient: ${question}
+    
+    Remember that the answer should be very easy to understand and concise. The objective is to help the user understand the condition and the medicine better.
+    Based on the documents, you have to generate an answer to the question.
+
+    <question>
+    ${question}
+    </question>
+
+    Output should be just the answer, nothing else.
+    Answer to the question.
+    `
+    
+    let messages = [
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ];
+
+    const thread = await openai.beta.threads.create({
+      messages: messages,
+    });
+
+    let threadId = thread.id;
+    console.log('Created thread with Id: ' + threadId);
+
+    const run = await openai.beta.threads.runs.createAndPoll(thread.id, {
+      assistant_id: config.EPAR_ASSISTANT_ID,
+      additional_instructions: '',
+    });
+
+    console.log('Run finished with status: ' + run.status);
+
+    if (run.status == 'completed') {
+      const messages = await openai.beta.threads.messages.list(thread.id);
+      let response = messages.getPaginatedItems()[0].content[0].text.value;
+      console.log(response)
+      /*let parsedResponse = extractAndParse(response);
+      console.log(parsedResponse)*/
+      res.status(200).send({ data: response })
+      // for (const message of messages.getPaginatedItems()) {
+      //   console.log(message);
+      // }
+    } else {
+      throw new Error("The run did not complete successfully.");
+    }
+  } catch (error) {
+    console.error('Error occurred:', error);
+    var respu = {
+      "msg": 'error',
+      "status": 500
+    }
+    res.status(500).send(respu)
+  }
+}
+
 
 module.exports = {
-    generate_items_for_disease,
+  getInfo,
+  getAnswer
 };
